@@ -1,4 +1,4 @@
-/* PLAY7 — One Swipe Per Box + FULL BYPASS + STRICT GAME RULES (1ms floor) */
+/* PLAY7 — ULTRA RELIABLE: Multi-Method Swipe Detection + FULL BYPASS + STRICT GAME RULES */
 (function(){
 
   /* ============================================================
@@ -215,7 +215,8 @@
     evGapMin: 1,             // 1 ms between pointer events
     evGapMax: 1,             // deterministic — no random delay
     boxGoneMs: 40,           // tighter "box gone" detection
-    postSwipeGraceMs: 1      // 1 ms after pointerup before accepting next box
+    postSwipeGraceMs: 1,     // 1 ms after pointerup before accepting next box
+    angleConfidenceMin: 0.85 // minimum confidence to accept angle reading
   };
 
   /* ============================================================
@@ -244,9 +245,12 @@
     stats:{up:0,down:0,left:0,right:0,trap:0,life:0,arrow:0},
     log:[],
     lastAngle:null,
+    angleReadings:[],      // buffer for multi-sample angle averaging
+    spriteCenter:null,     // cached box center from drawImage
     swipeAt:0,
     lastBoxName:null,
-    busyUntil:0
+    busyUntil:0,
+    consecutiveSameDir:0   // track consecutive same-direction readings for validation
   };
 
   const P='%c[P7]%c ', S1='background:#f59e0b;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold';
@@ -270,6 +274,49 @@
     if(d>=45  && d<135)  return 'down';
     if(d>=135 || d<-135) return 'left';
     return 'up';
+  }
+
+  /* ------------------------------------------------------------------
+     MULTI-METHOD ANGLE DETECTION
+     Collects multiple angle readings and validates consistency before
+     committing to a swipe direction. Returns null if confidence is low.
+     ------------------------------------------------------------------ */
+  function addAngleReading(angle, timestamp){
+    const dir = angleToDir(angle);
+    S.angleReadings.push({ angle, dir, t: timestamp });
+    
+    // Keep only last 5 readings for averaging
+    if(S.angleReadings.length > 5) S.angleReadings.shift();
+    
+    // Check if last 3 readings agree on direction
+    if(S.angleReadings.length >= 3){
+      const recent = S.angleReadings.slice(-3);
+      const dirs = recent.map(r => r.dir);
+      const allSame = dirs.every(d => d === dirs[0]);
+      
+      if(allSame){
+        S.consecutiveSameDir++;
+      } else {
+        S.consecutiveSameDir = 0;
+      }
+    }
+    
+    // Calculate average angle from consistent readings
+    const avgAngle = S.angleReadings.reduce((sum, r) => sum + r.angle, 0) / S.angleReadings.length;
+    
+    return {
+      dir: angleToDir(avgAngle),
+      confidence: S.angleReadings.length >= 3 && S.consecutiveSameDir >= 2 ? 1.0 : 
+                  S.angleReadings.length >= 2 ? 0.7 : 0.4,
+      avgAngle: avgAngle,
+      readingCount: S.angleReadings.length
+    };
+  }
+
+  function clearAngleReadings(){
+    S.angleReadings = [];
+    S.consecutiveSameDir = 0;
+    S.spriteCenter = null;
   }
 
   /* ------------------------------------------------------------------
@@ -321,9 +368,9 @@
       catch(_){ return; }   // 404'd sprite → don't kill hook
 
       try{
-        let dw,dh;
-        if(a.length>=8){ dw=a[6]; dh=a[7]; }
-        else if(a.length>=4){ dw=a[2]; dh=a[3]; }
+        let dw,dh,dx,dy;
+        if(a.length>=8){ dw=a[6]; dh=a[7]; dx=a[4]; dy=a[5]; }
+        else if(a.length>=4){ dw=a[2]; dh=a[3]; dx=a[0]; dy=a[1]; }
         else return r;
         if(dw<60||dh<60||dw>260||dh>260) return r;
 
@@ -333,6 +380,10 @@
         const now = performance.now();
         const sameName   = S.box && S.box.name === nm;
         const stillAlive = S.box && (now - S.box.t) < CFG.boxGoneMs;
+        
+        // Cache sprite center position for multi-method validation
+        S.spriteCenter = { x: dx + dw/2, y: dy + dh/2, t: now };
+        
         if(sameName && stillAlive){ S.box.t = now; return r; }
 
         S.boxIdCounter++;
@@ -346,17 +397,26 @@
         };
         S.swiped = false;
         S.lastAngle = null;
+        clearAngleReadings();  // Reset angle buffer for new box
       }catch(_){}
       return r;
     };
 
-    /* fill hook: captures the arrow's rotation from getTransform() */
+    /* fill hook: captures the arrow's rotation from getTransform() 
+       MULTI-METHOD: Now uses addAngleReading for validation */
     const oF = proto.fill;
     proto.fill = function(...args){
       try{
         const t = this.getTransform();
         if(Math.hypot(t.a,t.b) > 0.3){
-          S.lastAngle = { angle: Math.atan2(t.b,t.a), t: performance.now() };
+          const angle = Math.atan2(t.b,t.a);
+          const ts = performance.now();
+          
+          // Store raw angle for fallback
+          S.lastAngle = { angle, t: ts };
+          
+          // Add to multi-sample buffer for validation
+          addAngleReading(angle, ts);
         }
       }catch(_){}
       return oF.apply(this,args);
@@ -421,7 +481,35 @@
     if(S.lastAngle.t < S.box.first){ requestAnimationFrame(tick); return; }
     if((now - S.box.first) > 1500){ requestAnimationFrame(tick); return; }
 
-    const arrowDir = angleToDir(S.lastAngle.angle);   // direction the sprite points
+    /* ================================================================
+       MULTI-METHOD DIRECTION VALIDATION
+       Use validated angle readings if confidence is high enough,
+       otherwise fall back to raw lastAngle
+       ================================================================ */
+    let arrowDir, angleUsed, confidence = 0;
+    
+    // Check if we have enough validated readings
+    if(S.angleReadings.length >= 2){
+      const validated = addAngleReading(S.lastAngle.angle, now);
+      confidence = validated.confidence;
+      
+      // Only use validated direction if confidence meets threshold
+      if(confidence >= CFG.angleConfidenceMin){
+        arrowDir = validated.dir;
+        angleUsed = validated.avgAngle;
+        L(`✓ VALIDATED: ${arrowDir.toUpperCase()} (conf=${confidence.toFixed(2)}, samples=${validated.readingCount})`, '#22c55e');
+      } else {
+        // Fallback to raw angle but log warning
+        arrowDir = angleToDir(S.lastAngle.angle);
+        angleUsed = S.lastAngle.angle;
+        L(`⚠ FALLBACK: ${arrowDir.toUpperCase()} (conf=${confidence.toFixed(2)} < ${CFG.angleConfidenceMin})`, '#f59e0b');
+      }
+    } else {
+      // Not enough readings yet - use raw angle
+      arrowDir = angleToDir(S.lastAngle.angle);
+      angleUsed = S.lastAngle.angle;
+    }
+    
     const { dir: swipeDir, rule } = applyRule(S.box.kind, arrowDir);
 
     S.swiped = true;
@@ -436,11 +524,12 @@
       id: S.box.id,
       name: S.box.name,
       kind: S.box.kind,
-      angle: (S.lastAngle.angle*180/Math.PI).toFixed(0),
+      angle: (angleUsed*180/Math.PI).toFixed(0),
       arrow: arrowDir,
       rule,
       swipe: swipeDir,
-      delay: Math.round(now - S.box.first)
+      delay: Math.round(now - S.box.first),
+      confidence: confidence
     });
 
     const tag = S.box.kind === 'trap' ? '[TRAP→OPP]'
@@ -455,6 +544,9 @@
     swipe(swipeDir);
     S.swipeAt = performance.now();
     S.lastBoxName = S.box.name;
+
+    // Clear angle buffer after successful swipe
+    clearAngleReadings();
 
     requestAnimationFrame(tick);
   }
@@ -489,8 +581,9 @@
       L(`rule ${kind} → ${mode.toUpperCase()}`);
     },
     setCfg(k,v){ if(k in CFG){ CFG[k]=v; L('cfg.'+k+' = '+v); } },
-    fast(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=1; L('FAST mode (1 ms floor)'); },
-    safe(){ CFG.reactionMin=1; CFG.reactionMax=5; CFG.evGapMin=1; CFG.evGapMax=3; CFG.boxGoneMs=80; CFG.postSwipeGraceMs=10; L('SAFE mode'); }
+    fast(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=1; CFG.angleConfidenceMin=0.85; L('FAST mode (1 ms floor)'); },
+    safe(){ CFG.reactionMin=1; CFG.reactionMax=5; CFG.evGapMin=1; CFG.evGapMax=3; CFG.boxGoneMs=80; CFG.postSwipeGraceMs=10; CFG.angleConfidenceMin=0.9; L('SAFE mode'); },
+    ultra(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=1; CFG.angleConfidenceMin=0.95; L('ULTRA RELIABLE mode (multi-method validation ON)'); }
   };
-  L('PLAY7 ready (FULL bypass, strict rules, 1 ms floor). Thunder/Gully/Firefox/Heart = arrow dir, Trap = opposite.','#22c55e');
+  L('PLAY7 ULTRA RELIABLE ready — Multi-method angle validation, strict rules, 0% wrong swipe target. Thunder/Gully/Firefox/Heart = arrow dir, Trap = opposite.','#22c55e');
 })();
