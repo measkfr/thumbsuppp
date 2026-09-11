@@ -215,10 +215,11 @@
     evGapMin: 1,             // 1 ms between pointer events
     evGapMax: 1,             // deterministic — no random delay
     boxGoneMs: 40,           // tighter "box gone" detection
-    postSwipeGraceMs: 1,     // 1 ms after pointerup before accepting next box
-    angleConfidenceMin: 0.98,// EXTREME confidence required (was 0.85)
-    minAngleSamples: 4,      // Minimum consistent samples required (was 3)
-    maxAngleVariance: 0.15   // Max radians variance allowed between samples
+    postSwipeGraceMs: 80,    // 80 ms after pointerup before accepting next box (ONE-BY-ONE)
+    angleConfidenceMin: 0.99,// EXTREME confidence required
+    minAngleSamples: 5,      // Minimum consistent samples required (increased)
+    maxAngleVariance: 0.10,  // Max radians variance allowed between samples (tighter)
+    consecutiveRequired: 5   // Consecutive same-direction readings required
   };
 
   /* ============================================================
@@ -282,17 +283,18 @@
      MULTI-METHOD ANGLE DETECTION - ULTRA RELIABLE
      Collects multiple angle readings and validates consistency before
      committing to a swipe direction. Returns null if confidence is low.
-     Uses 3-method validation:
+     Uses 4-method validation:
      1. Direction consistency check (all samples must agree)
      2. Angle variance check (angles must be within tight tolerance)
-     3. Sample count check (minimum 4 consistent samples required)
+     3. Sample count check (minimum 5 consistent samples required)
+     4. Consecutive reading check (must have N consecutive same-direction)
      ------------------------------------------------------------------ */
   function addAngleReading(angle, timestamp){
     const dir = angleToDir(angle);
     S.angleReadings.push({ angle, dir, t: timestamp });
     
-    // Keep only last 8 readings for averaging (increased from 5)
-    if(S.angleReadings.length > 8) S.angleReadings.shift();
+    // Keep only last 10 readings for averaging (increased buffer)
+    if(S.angleReadings.length > 10) S.angleReadings.shift();
     
     // Check if ALL recent readings agree on direction
     const checkCount = Math.min(S.angleReadings.length, CFG.minAngleSamples);
@@ -312,6 +314,7 @@
     const hasEnoughSamples = S.angleReadings.length >= CFG.minAngleSamples;
     const hasLowVariance = variance <= CFG.maxAngleVariance;
     const isDirectionConsistent = allSame && checkCount >= CFG.minAngleSamples;
+    const hasConsecutiveReadings = S.consecutiveSameDir >= CFG.consecutiveRequired;
     
     if(allSame){
       S.consecutiveSameDir++;
@@ -324,14 +327,14 @@
     
     // Confidence scoring: must pass ALL checks for 1.0
     let confidence = 0.0;
-    if(hasEnoughSamples && hasLowVariance && isDirectionConsistent){
-      confidence = 1.0;  // Perfect confidence - all checks passed
-    } else if(hasEnoughSamples && isDirectionConsistent){
-      confidence = 0.95; // High confidence - direction consistent but variance slightly high
-    } else if(S.angleReadings.length >= 3 && allSame){
-      confidence = 0.7;  // Medium confidence - at least 3 consistent readings
+    if(hasEnoughSamples && hasLowVariance && isDirectionConsistent && hasConsecutiveReadings){
+      confidence = 1.0;  // Perfect confidence - all 4 checks passed
+    } else if(hasEnoughSamples && hasLowVariance && isDirectionConsistent){
+      confidence = 0.97; // Very high confidence - 3 checks passed
+    } else if(S.angleReadings.length >= 4 && allSame){
+      confidence = 0.8;  // Medium confidence - at least 4 consistent readings
     } else {
-      confidence = 0.4;  // Low confidence - not enough data
+      confidence = 0.3;  // Low confidence - not enough data
     }
     
     return {
@@ -340,7 +343,7 @@
       avgAngle: avgAngle,
       readingCount: S.angleReadings.length,
       variance: variance,
-      passesAllChecks: hasEnoughSamples && hasLowVariance && isDirectionConsistent
+      passesAllChecks: hasEnoughSamples && hasLowVariance && isDirectionConsistent && hasConsecutiveReadings
     };
   }
 
@@ -516,6 +519,7 @@
        ULTRA-RELIABLE MULTI-METHOD DIRECTION VALIDATION
        ONLY swipe if ALL validation checks pass with extreme confidence.
        NO fallback to raw angle - WAIT for validated readings.
+       ONE-BY-ONE: Wait for box to fully appear before swiping
        ================================================================ */
     let arrowDir, angleUsed, confidence = 0, validated = null;
     
@@ -525,14 +529,17 @@
     
     // CRITICAL: Only use direction if it passes ALL validation checks
     // NO FALLBACK to raw angle - this prevents wrong swipes
-    if(validated.passesAllChecks && confidence >= CFG.angleConfidenceMin){
+    // Also ensure box has been visible long enough (one-by-one)
+    const boxVisibleLongEnough = (now - S.box.first) > 60; // Wait 60ms after box appears
+    
+    if(validated.passesAllChecks && confidence >= CFG.angleConfidenceMin && boxVisibleLongEnough){
       arrowDir = validated.dir;
       angleUsed = validated.avgAngle;
-      L(`✓ VALIDATED: ${arrowDir.toUpperCase()} (conf=${confidence.toFixed(2)}, samples=${validated.readingCount}, var=${validated.variance.toFixed(3)})`, '#22c55e');
+      L(`✓ VALIDATED: ${arrowDir.toUpperCase()} (conf=${confidence.toFixed(2)}, samples=${validated.readingCount}, var=${validated.variance.toFixed(3)}, consecutive=${S.consecutiveSameDir})`, '#22c55e');
     } else {
-      // DO NOT SWIPE - wait for more readings
+      // DO NOT SWIPE - wait for more readings or box to stabilize
       // This is the key fix: never fall back to unvalidated angle
-      L(`⏳ WAITING: conf=${confidence.toFixed(2)}, samples=${validated.readingCount}, var=${validated.variance.toFixed(3)}`, '#f59e0b');
+      L(`⏳ WAITING: conf=${confidence.toFixed(2)}, samples=${validated.readingCount}, var=${validated.variance.toFixed(3)}, consecutive=${S.consecutiveSameDir}/${CFG.consecutiveRequired}`, '#f59e0b');
       requestAnimationFrame(tick);
       return;
     }
@@ -610,9 +617,9 @@
       L(`rule ${kind} → ${mode.toUpperCase()}`);
     },
     setCfg(k,v){ if(k in CFG){ CFG[k]=v; L('cfg.'+k+' = '+v); } },
-    fast(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=1; CFG.angleConfidenceMin=0.85; CFG.minAngleSamples=3; CFG.maxAngleVariance=0.2; L('FAST mode (1 ms floor)'); },
-    safe(){ CFG.reactionMin=1; CFG.reactionMax=5; CFG.evGapMin=1; CFG.evGapMax=3; CFG.boxGoneMs=80; CFG.postSwipeGraceMs=10; CFG.angleConfidenceMin=0.9; CFG.minAngleSamples=4; CFG.maxAngleVariance=0.15; L('SAFE mode'); },
-    ultra(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=1; CFG.angleConfidenceMin=0.98; CFG.minAngleSamples=4; CFG.maxAngleVariance=0.15; L('ULTRA RELIABLE mode - 0%% WRONG SWIPE TARGET: multi-method validation ON, NO FALLBACK'); }
+    fast(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=80; CFG.angleConfidenceMin=0.99; CFG.minAngleSamples=5; CFG.maxAngleVariance=0.10; CFG.consecutiveRequired=5; L('FAST mode (1 ms floor)'); },
+    safe(){ CFG.reactionMin=1; CFG.reactionMax=5; CFG.evGapMin=1; CFG.evGapMax=3; CFG.boxGoneMs=80; CFG.postSwipeGraceMs=100; CFG.angleConfidenceMin=0.99; CFG.minAngleSamples=6; CFG.maxAngleVariance=0.08; CFG.consecutiveRequired=6; L('SAFE mode'); },
+    ultra(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=80; CFG.angleConfidenceMin=0.99; CFG.minAngleSamples=5; CFG.maxAngleVariance=0.10; CFG.consecutiveRequired=5; L('ULTRA RELIABLE mode - 0%% WRONG SWIPE: 4-method validation, one-by-one swipe') }
   };
-  L('PLAY7 ULTRA RELIABLE ready - 0%% WRONG SWIPE GUARANTEE: Multi-method validation (direction+variance+samples), NO FALLBACK, strict rules. Thunder/Gully/Firefox/Heart=SAME dir, Trap=OPPOSITE.','#22c55e');
+  L('PLAY7 ULTRA RELIABLE ready - 0%% WRONG SWIPE: 4-method validation (direction+variance+samples+consecutive), one-by-one swipe, NO FALLBACK. Thunder/Gully/Firefox/Heart=SAME dir, Trap=OPPOSITE.','#22c55e');
 })();
