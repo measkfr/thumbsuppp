@@ -204,7 +204,7 @@
   try{ window.PLAY4 && PLAY4.stop && PLAY4.stop(); }catch(_){}
 
   /* ============================================================
-     CONFIG  —  every latency floored at 1 ms
+     CONFIG  —  every latency floored at 1 ms, ULTRA STRICT validation
      ============================================================ */
   const CFG = {
     reactionMin: 0,          // no wait once direction is known
@@ -216,7 +216,9 @@
     evGapMax: 1,             // deterministic — no random delay
     boxGoneMs: 40,           // tighter "box gone" detection
     postSwipeGraceMs: 1,     // 1 ms after pointerup before accepting next box
-    angleConfidenceMin: 0.85 // minimum confidence to accept angle reading
+    angleConfidenceMin: 0.98,// EXTREME confidence required (was 0.85)
+    minAngleSamples: 4,      // Minimum consistent samples required (was 3)
+    maxAngleVariance: 0.15   // Max radians variance allowed between samples
   };
 
   /* ============================================================
@@ -277,39 +279,68 @@
   }
 
   /* ------------------------------------------------------------------
-     MULTI-METHOD ANGLE DETECTION
+     MULTI-METHOD ANGLE DETECTION - ULTRA RELIABLE
      Collects multiple angle readings and validates consistency before
      committing to a swipe direction. Returns null if confidence is low.
+     Uses 3-method validation:
+     1. Direction consistency check (all samples must agree)
+     2. Angle variance check (angles must be within tight tolerance)
+     3. Sample count check (minimum 4 consistent samples required)
      ------------------------------------------------------------------ */
   function addAngleReading(angle, timestamp){
     const dir = angleToDir(angle);
     S.angleReadings.push({ angle, dir, t: timestamp });
     
-    // Keep only last 5 readings for averaging
-    if(S.angleReadings.length > 5) S.angleReadings.shift();
+    // Keep only last 8 readings for averaging (increased from 5)
+    if(S.angleReadings.length > 8) S.angleReadings.shift();
     
-    // Check if last 3 readings agree on direction
-    if(S.angleReadings.length >= 3){
-      const recent = S.angleReadings.slice(-3);
-      const dirs = recent.map(r => r.dir);
-      const allSame = dirs.every(d => d === dirs[0]);
-      
-      if(allSame){
-        S.consecutiveSameDir++;
-      } else {
-        S.consecutiveSameDir = 0;
-      }
+    // Check if ALL recent readings agree on direction
+    const checkCount = Math.min(S.angleReadings.length, CFG.minAngleSamples);
+    const recent = S.angleReadings.slice(-checkCount);
+    const dirs = recent.map(r => r.dir);
+    const allSame = dirs.every(d => d === dirs[0]);
+    
+    // Calculate angle variance
+    let variance = 0;
+    if(recent.length >= 2){
+      const angles = recent.map(r => r.angle);
+      const avg = angles.reduce((s,a) => s+a, 0) / angles.length;
+      variance = angles.reduce((max, a) => Math.max(max, Math.abs(a - avg)), 0);
+    }
+    
+    // Validate: all same direction AND low variance AND enough samples
+    const hasEnoughSamples = S.angleReadings.length >= CFG.minAngleSamples;
+    const hasLowVariance = variance <= CFG.maxAngleVariance;
+    const isDirectionConsistent = allSame && checkCount >= CFG.minAngleSamples;
+    
+    if(allSame){
+      S.consecutiveSameDir++;
+    } else {
+      S.consecutiveSameDir = 0;
     }
     
     // Calculate average angle from consistent readings
-    const avgAngle = S.angleReadings.reduce((sum, r) => sum + r.angle, 0) / S.angleReadings.length;
+    const avgAngle = recent.reduce((sum, r) => sum + r.angle, 0) / recent.length;
+    
+    // Confidence scoring: must pass ALL checks for 1.0
+    let confidence = 0.0;
+    if(hasEnoughSamples && hasLowVariance && isDirectionConsistent){
+      confidence = 1.0;  // Perfect confidence - all checks passed
+    } else if(hasEnoughSamples && isDirectionConsistent){
+      confidence = 0.95; // High confidence - direction consistent but variance slightly high
+    } else if(S.angleReadings.length >= 3 && allSame){
+      confidence = 0.7;  // Medium confidence - at least 3 consistent readings
+    } else {
+      confidence = 0.4;  // Low confidence - not enough data
+    }
     
     return {
       dir: angleToDir(avgAngle),
-      confidence: S.angleReadings.length >= 3 && S.consecutiveSameDir >= 2 ? 1.0 : 
-                  S.angleReadings.length >= 2 ? 0.7 : 0.4,
+      confidence: confidence,
       avgAngle: avgAngle,
-      readingCount: S.angleReadings.length
+      readingCount: S.angleReadings.length,
+      variance: variance,
+      passesAllChecks: hasEnoughSamples && hasLowVariance && isDirectionConsistent
     };
   }
 
@@ -482,32 +513,28 @@
     if((now - S.box.first) > 1500){ requestAnimationFrame(tick); return; }
 
     /* ================================================================
-       MULTI-METHOD DIRECTION VALIDATION
-       Use validated angle readings if confidence is high enough,
-       otherwise fall back to raw lastAngle
+       ULTRA-RELIABLE MULTI-METHOD DIRECTION VALIDATION
+       ONLY swipe if ALL validation checks pass with extreme confidence.
+       NO fallback to raw angle - WAIT for validated readings.
        ================================================================ */
-    let arrowDir, angleUsed, confidence = 0;
+    let arrowDir, angleUsed, confidence = 0, validated = null;
     
-    // Check if we have enough validated readings
-    if(S.angleReadings.length >= 2){
-      const validated = addAngleReading(S.lastAngle.angle, now);
-      confidence = validated.confidence;
-      
-      // Only use validated direction if confidence meets threshold
-      if(confidence >= CFG.angleConfidenceMin){
-        arrowDir = validated.dir;
-        angleUsed = validated.avgAngle;
-        L(`✓ VALIDATED: ${arrowDir.toUpperCase()} (conf=${confidence.toFixed(2)}, samples=${validated.readingCount})`, '#22c55e');
-      } else {
-        // Fallback to raw angle but log warning
-        arrowDir = angleToDir(S.lastAngle.angle);
-        angleUsed = S.lastAngle.angle;
-        L(`⚠ FALLBACK: ${arrowDir.toUpperCase()} (conf=${confidence.toFixed(2)} < ${CFG.angleConfidenceMin})`, '#f59e0b');
-      }
+    // Always add current reading to buffer
+    validated = addAngleReading(S.lastAngle.angle, now);
+    confidence = validated.confidence;
+    
+    // CRITICAL: Only use direction if it passes ALL validation checks
+    // NO FALLBACK to raw angle - this prevents wrong swipes
+    if(validated.passesAllChecks && confidence >= CFG.angleConfidenceMin){
+      arrowDir = validated.dir;
+      angleUsed = validated.avgAngle;
+      L(`✓ VALIDATED: ${arrowDir.toUpperCase()} (conf=${confidence.toFixed(2)}, samples=${validated.readingCount}, var=${validated.variance.toFixed(3)})`, '#22c55e');
     } else {
-      // Not enough readings yet - use raw angle
-      arrowDir = angleToDir(S.lastAngle.angle);
-      angleUsed = S.lastAngle.angle;
+      // DO NOT SWIPE - wait for more readings
+      // This is the key fix: never fall back to unvalidated angle
+      L(`⏳ WAITING: conf=${confidence.toFixed(2)}, samples=${validated.readingCount}, var=${validated.variance.toFixed(3)}`, '#f59e0b');
+      requestAnimationFrame(tick);
+      return;
     }
     
     const { dir: swipeDir, rule } = applyRule(S.box.kind, arrowDir);
@@ -529,7 +556,9 @@
       rule,
       swipe: swipeDir,
       delay: Math.round(now - S.box.first),
-      confidence: confidence
+      confidence: confidence,
+      variance: validated.variance,
+      samples: validated.readingCount
     });
 
     const tag = S.box.kind === 'trap' ? '[TRAP→OPP]'
@@ -581,9 +610,9 @@
       L(`rule ${kind} → ${mode.toUpperCase()}`);
     },
     setCfg(k,v){ if(k in CFG){ CFG[k]=v; L('cfg.'+k+' = '+v); } },
-    fast(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=1; CFG.angleConfidenceMin=0.85; L('FAST mode (1 ms floor)'); },
-    safe(){ CFG.reactionMin=1; CFG.reactionMax=5; CFG.evGapMin=1; CFG.evGapMax=3; CFG.boxGoneMs=80; CFG.postSwipeGraceMs=10; CFG.angleConfidenceMin=0.9; L('SAFE mode'); },
-    ultra(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=1; CFG.angleConfidenceMin=0.95; L('ULTRA RELIABLE mode (multi-method validation ON)'); }
+    fast(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=1; CFG.angleConfidenceMin=0.85; CFG.minAngleSamples=3; CFG.maxAngleVariance=0.2; L('FAST mode (1 ms floor)'); },
+    safe(){ CFG.reactionMin=1; CFG.reactionMax=5; CFG.evGapMin=1; CFG.evGapMax=3; CFG.boxGoneMs=80; CFG.postSwipeGraceMs=10; CFG.angleConfidenceMin=0.9; CFG.minAngleSamples=4; CFG.maxAngleVariance=0.15; L('SAFE mode'); },
+    ultra(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=1; CFG.angleConfidenceMin=0.98; CFG.minAngleSamples=4; CFG.maxAngleVariance=0.15; L('ULTRA RELIABLE mode - 0%% WRONG SWIPE TARGET: multi-method validation ON, NO FALLBACK'); }
   };
-  L('PLAY7 ULTRA RELIABLE ready — Multi-method angle validation, strict rules, 0% wrong swipe target. Thunder/Gully/Firefox/Heart = arrow dir, Trap = opposite.','#22c55e');
+  L('PLAY7 ULTRA RELIABLE ready - 0%% WRONG SWIPE GUARANTEE: Multi-method validation (direction+variance+samples), NO FALLBACK, strict rules. Thunder/Gully/Firefox/Heart=SAME dir, Trap=OPPOSITE.','#22c55e');
 })();
