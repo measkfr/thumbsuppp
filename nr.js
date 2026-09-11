@@ -1,4 +1,4 @@
-/* PLAY7 — Fast & Clean (no penalty, minimal delay) */
+/* PLAY7 — Human-like Noob Mode (appears slow/random but pro inside) */
 (function(){
   if(window.PLAY7 && window.PLAY7.__live){
     try{ PLAY7.stop(); }catch(_){}
@@ -9,18 +9,42 @@
   try{ window.PLAY4 && PLAY4.stop && PLAY4.stop(); }catch(_){}
 
   const CFG = {
-    reactionMin: 0,        // instant
-    reactionMax: 25,       // halka jitter only
+    // Reaction time: appear slow like a noob (200ms to 800ms average)
+    reactionMin: 150,
+    reactionMax: 600,
 
-    jitterPx: 5,
-    distMin: 0.36,
-    distMax: 0.46,
+    // Add extra randomness to reaction
+    reactionJitter: 300,
 
-    evGapMin: 4,
-    evGapMax: 10,
+    jitterPx: 8,
+    distMin: 0.32,
+    distMax: 0.52,
 
-    sameBoxCooldown: 350,
-    inactivityResetMs: 300
+    evGapMin: 8,
+    evGapMax: 18,
+
+    sameBoxCooldown: 500,
+    inactivityResetMs: 600,
+
+    // NEW: Random progress threshold (30% to 95% of screen)
+    swipeProgressMin: 0.30,
+    swipeProgressMax: 0.95,
+
+    // NEW: Chance to skip a box (appear human, miss sometimes)
+    skipChance: 0.15,  // 15% chance to skip non-trap boxes
+
+    // NEW: Variable speed modes
+    speedModes: ['slow', 'medium', 'fast', 'veryfast'],
+    currentSpeed: 'medium',
+    speedChangeChance: 0.3,  // 30% chance to change speed after each swipe
+
+    // Speed profiles (reaction time ranges)
+    speedProfiles: {
+      slow: { min: 400, max: 900 },
+      medium: { min: 200, max: 500 },
+      fast: { min: 100, max: 300 },
+      veryfast: { min: 50, max: 150 }
+    }
   };
 
   const rnd=(a,b)=>a+Math.random()*(b-a);
@@ -151,6 +175,39 @@
 
   const opp=d=>d==='up'?'down':d==='down'?'up':d==='left'?'right':'left';
 
+  // Helper: Change speed mode randomly
+  function changeSpeedMode(){
+    if(Math.random() < CFG.speedChangeChance){
+      const modes = CFG.speedModes.filter(m => m !== CFG.currentSpeed);
+      CFG.currentSpeed = modes[rndi(0, modes.length - 1)];
+      const profile = CFG.speedProfiles[CFG.currentSpeed];
+      CFG.reactionMin = profile.min;
+      CFG.reactionMax = profile.max;
+      L(`Speed changed to: ${CFG.currentSpeed} (${CFG.reactionMin}-${CFG.reactionMax}ms)`, '#a855f7');
+    }
+  }
+
+  // Helper: Check if box has reached swipe threshold (30%-95% of screen)
+  function shouldSwipeNow(box, lastAngle, canvasHeight){
+    if(!box || !lastAngle) return false;
+    
+    // For trap boxes, always swipe correctly (pro inside)
+    if(box.trap) return true;
+    
+    // Random progress threshold: swipe when box is between 30%-95% across screen
+    const timeAlive = performance.now() - box.first;
+    const maxTime = 1200; // box travels for ~1200ms typically
+    
+    // Calculate approximate progress (0 to 1)
+    const progress = Math.min(1, timeAlive / maxTime);
+    
+    // Get random threshold for this box
+    const threshold = rnd(CFG.swipeProgressMin, CFG.swipeProgressMax);
+    
+    // Swipe if we've passed the threshold
+    return progress >= threshold;
+  }
+
   let running = true;
   function tick(){
     if(!running) return;
@@ -159,7 +216,26 @@
 
     if(!S.swiped && S.box && S.lastAngle){
       if(now < S.box.readyAt){ requestAnimationFrame(tick); return; }
-      if(S.lastAngle.t >= S.box.first && (now - S.box.first) < 1200){
+      if(S.lastAngle.t >= S.box.first && (now - S.box.first) < 1500){
+        
+        // Check if we should skip this box (appear human, sometimes miss)
+        if(!S.box.trap && Math.random() < CFG.skipChance){
+          L(`⊘ Skipping #${S.count+1} [APPEAR HUMAN] ${S.box.name}`, '#94a3b8');
+          S.swiped = true;  // Mark as processed but don't swipe
+          S.box = null;
+          S.lastAngle = null;
+          changeSpeedMode();
+          requestAnimationFrame(tick);
+          return;
+        }
+        
+        // Check if box has reached random progress threshold
+        const c = cv();
+        if(c && !shouldSwipeNow(S.box, S.lastAngle, c.height)){
+          requestAnimationFrame(tick);
+          return;
+        }
+        
         const rawDir   = angleToDir(S.lastAngle.angle);
         const swipeDir = S.box.trap ? opp(rawDir) : rawDir;
 
@@ -172,15 +248,19 @@
           name:S.box.name,
           angle:(S.lastAngle.angle*180/Math.PI).toFixed(0),
           raw:rawDir, swipe:swipeDir, trap:S.box.trap,
-          delay:Math.round(now-S.box.first)
+          delay:Math.round(now-S.box.first),
+          speedMode: CFG.currentSpeed
         });
 
-        L(`→ ${swipeDir.toUpperCase()} #${S.count} ${S.box.trap?'[TRAP]':'[ARROW]'} ${S.box.name} raw=${rawDir} delay=${Math.round(now-S.box.first)}ms`,
+        L(`→ ${swipeDir.toUpperCase()} #${S.count} ${S.box.trap?'[TRAP]':'[ARROW]'} ${S.box.name} raw=${rawDir} delay=${Math.round(now-S.box.first)}ms [${CFG.currentSpeed}]`,
           S.box.trap?'#f59e0b':'#22d3ee');
 
         swipe(swipeDir);
         S.swipeAt = performance.now();
         S.lastBoxName = S.box.name;
+        
+        // Change speed mode after each swipe
+        changeSpeedMode();
       }
     }
     requestAnimationFrame(tick);
@@ -210,8 +290,31 @@
     angle(){return S.lastAngle;},
     cfg(){return {...CFG};},
     setCfg(k,v){ if(k in CFG){ CFG[k]=v; L('cfg.'+k+' = '+v); } },
+    
+    // Speed modes for appearing human
     fast(){ CFG.reactionMin=0; CFG.reactionMax=10; CFG.evGapMin=3; CFG.evGapMax=7; L('FAST mode'); },
-    safe(){ CFG.reactionMin=20; CFG.reactionMax=50; CFG.evGapMin=5; CFG.evGapMax=12; L('SAFE mode'); }
+    safe(){ CFG.reactionMin=20; CFG.reactionMax=50; CFG.evGapMin=5; CFG.evGapMax=12; L('SAFE mode'); },
+    
+    // NEW: Human-like noob mode (default)
+    noob(){ 
+      CFG.reactionMin=150; CFG.reactionMax=600; CFG.reactionJitter=300;
+      CFG.swipeProgressMin=0.30; CFG.swipeProgressMax=0.95;
+      CFG.skipChance=0.15; CFG.speedChangeChance=0.3;
+      CFG.currentSpeed='medium';
+      L('NOOB MODE: Appears slow & random but pro inside! 💛', '#fbbf24');
+    },
+    
+    // Set specific skip chance
+    setSkipChance(v){ CFG.skipChance=v; L(`Skip chance: ${Math.round(v*100)}%`); },
+    
+    // Set progress range (when to swipe)
+    setProgressRange(min,max){ CFG.swipeProgressMin=min; CFG.swipeProgressMax=max; L(`Progress range: ${min}-${max}`); },
+    
+    // Get current status
+    status(){ 
+      L(`Current speed: ${CFG.currentSpeed}, Skip chance: ${Math.round(CFG.skipChance*100)}%, Progress: ${CFG.swipeProgressMin}-${CFG.swipeProgressMax}`, '#22c55e');
+      return {speed: CFG.currentSpeed, skipChance: CFG.skipChance, progress: [CFG.swipeProgressMin, CFG.swipeProgressMax]};
+    }
   };
-  L('PLAY7 ready. Use PLAY7.fast() for max speed.','#22c55e');
+  L('PLAY7 ready - NOOB MODE active (appears slow but pro inside!) 💛','#22c55e');
 })();
