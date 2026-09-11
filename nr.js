@@ -224,7 +224,11 @@
     maxReadingsBuffer: 12,   // Buffer size
     minBoxVisibleMs: 80,     // Box must be visible for 80ms (fast)
     maxAngleChangePerFrame: 0.5, // Max angle change per frame (relaxed)
-    directionLockFrames: 5   // 5 frames with same direction (fast)
+    directionLockFrames: 5,  // 5 frames with same direction (fast)
+    minSwipeWindowMs: 70,    // MINIMUM time before swipe can execute (prevents ultra-fast miss)
+    lastBoxSize: null,       // Track last box size for detection
+    sizeChangeThreshold: 1.3,// Box size increased by 30% = high score mode
+    highScoreMode: false     // Auto-detect high score based on box size
   };
 
   /* ============================================================
@@ -455,6 +459,23 @@
         const sameName   = S.box && S.box.name === nm;
         const stillAlive = S.box && (now - S.box.t) < CFG.boxGoneMs;
         
+        // Detect box size for high-score mode detection
+        const currentBoxSize = dw * dh;
+        let isHighScoreBox = false;
+        
+        // Check if box size increased significantly (1500+ score indicator)
+        if(CFG.lastBoxSize !== null && currentBoxSize > CFG.lastBoxSize * CFG.sizeChangeThreshold){
+          CFG.highScoreMode = true;
+          isHighScoreBox = true;
+          console.log('%c[P7]%c HIGH SCORE DETECTED! Box size: '+currentBoxSize.toFixed(0)+' (was '+CFG.lastBoxSize.toFixed(0)+')', 'background:#f59e0b;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold', 'color:#fcd34d');
+        } else if(CFG.lastBoxSize !== null && currentBoxSize < CFG.lastBoxSize * 0.7){
+          // Box size decreased, reset high score mode
+          CFG.highScoreMode = false;
+        }
+        
+        // Update last box size
+        CFG.lastBoxSize = currentBoxSize;
+        
         // Cache sprite center position for multi-method validation
         S.spriteCenter = { x: dx + dw/2, y: dy + dh/2, t: now };
         
@@ -472,12 +493,18 @@
           kind: boxKind(nm),
           t: now,
           first: now,
-          readyAt: now + rnd(CFG.reactionMin, CFG.reactionMax)
+          readyAt: now + rnd(CFG.reactionMin, CFG.reactionMax),
+          isHighScore: isHighScoreBox
         };
         S.swiped = false;
         S.lastAngle = null;
         S.boxStableStartTime = now;  // Set box stable start time
         clearAngleReadings();  // Reset angle buffer for new box
+        
+        // If high score box detected, enforce minimum swipe window
+        if(isHighScoreBox){
+          S.busyUntil = Math.max(S.busyUntil, now + CFG.minSwipeWindowMs);
+        }
       }catch(_){}
       return r;
     };
@@ -560,6 +587,13 @@
     if(now < S.box.readyAt){ requestAnimationFrame(tick); return; }
     if(S.lastAngle.t < S.box.first){ requestAnimationFrame(tick); return; }
     if((now - S.box.first) > 1500){ requestAnimationFrame(tick); return; }
+    
+    // HIGH SCORE MODE: Enforce minimum swipe window to prevent missing boxes
+    // that appear for extremely short time at high scores (1500+)
+    if(S.box.isHighScore && (now - S.box.first) < CFG.minSwipeWindowMs){
+      requestAnimationFrame(tick);
+      return;
+    }
 
     /* ================================================================
        FAST + ACCURATE DIRECTION VALIDATION - Quick response for rapid boxes
@@ -582,10 +616,16 @@
     const boxStableWaitPassed = (now - S.box.first) >= CFG.boxStableWaitMs;
     const hasLockedDirection = validated.lockedDir !== null;
     
+    // HIGH SCORE MODE: Stricter validation for large boxes
+    const isHighScoreActive = CFG.highScoreMode || S.box.isHighScore;
+    const minSamplesForHighScore = isHighScoreActive ? 8 : CFG.minAngleSamples;
+    const confidenceForHighScore = isHighScoreActive ? 0.98 : CFG.angleConfidenceMin;
+    
     // BALANCED VALIDATION: Must pass key checks but faster
     const allChecksPass = 
       validated.passesAllChecks &&                    // validation passed
-      confidence >= CFG.angleConfidenceMin &&         // Confidence threshold
+      validated.readingCount >= minSamplesForHighScore && // More samples for high score
+      confidence >= confidenceForHighScore &&         // Confidence threshold
       boxVisibleLongEnough &&                         // Box visible time
       hasLockedDirection;                             // Direction is locked
     
@@ -686,6 +726,7 @@
       CFG.consecutiveRequired=5; CFG.boxStableWaitMs=60; 
       CFG.maxReadingsBuffer=12; CFG.minBoxVisibleMs=80; 
       CFG.maxAngleChangePerFrame=0.5; CFG.directionLockFrames=5;
+      CFG.minSwipeWindowMs=70;
       L('FAST mode - Quick response for rapid boxes') 
     },
     ultra(){ 
@@ -695,6 +736,7 @@
       CFG.consecutiveRequired=10; CFG.boxStableWaitMs=150; 
       CFG.maxReadingsBuffer=20; CFG.minBoxVisibleMs=180; 
       CFG.maxAngleChangePerFrame=0.25; CFG.directionLockFrames=12;
+      CFG.minSwipeWindowMs=100;
       L('ULTRA RELIABLE mode - Maximum accuracy') 
     },
     human(){ 
@@ -704,8 +746,21 @@
       CFG.consecutiveRequired=12; CFG.boxStableWaitMs=180; 
       CFG.maxReadingsBuffer=25; CFG.minBoxVisibleMs=200; 
       CFG.maxAngleChangePerFrame=0.2; CFG.directionLockFrames=15;
+      CFG.minSwipeWindowMs=120;
       L('HUMAN MODE - Slow human-like timing') 
+    },
+    highscore(){
+      // Special mode for 1500+ scores with large boxes and ultra-fast speed
+      CFG.reactionMin=30; CFG.reactionMax=60; CFG.evGapMin=1; CFG.evGapMax=3;
+      CFG.boxGoneMs=50; CFG.postSwipeGraceMs=100;
+      CFG.angleConfidenceMin=0.97; CFG.minAngleSamples=7; CFG.maxAngleVariance=0.12;
+      CFG.consecutiveRequired=7; CFG.boxStableWaitMs=50;
+      CFG.maxReadingsBuffer=15; CFG.minBoxVisibleMs=60;
+      CFG.maxAngleChangePerFrame=0.6; CFG.directionLockFrames=6;
+      CFG.minSwipeWindowMs=80; CFG.sizeChangeThreshold=1.25;
+      CFG.highScoreMode = true;
+      L('HIGH SCORE MODE - Optimized for 1500+ scores with large fast boxes','#f59e0b');
     }
   };
-  L('PLAY7 FAST ready - Optimized for rapid boxes with accurate swipes. Thunder/Gully/Firefox/Heart=SAME dir, Trap=OPPOSITE. Use PLAY7.fast() for speed or PLAY7.ultra() for maximum accuracy.','#22c55e');
+  L('PLAY7 FAST ready - Optimized for rapid boxes with accurate swipes. Thunder/Gully/Firefox/Heart=SAME dir, Trap=OPPOSITE. Use PLAY7.fast() for speed, PLAY7.ultra() for accuracy, or PLAY7.highscore() for 1500+ scores.','#22c55e');
 })();
