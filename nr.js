@@ -204,27 +204,27 @@
   try{ window.PLAY4 && PLAY4.stop && PLAY4.stop(); }catch(_){}
 
   /* ============================================================
-     CONFIG  —  HUMAN-LIKE TIMING + ULTRA STRICT validation
+     CONFIG  —  FAST + ACCURATE: Balanced timing for rapid boxes
      ============================================================ */
   const CFG = {
-    reactionMin: 80,         // Wait 80ms after box appears (human-like)
-    reactionMax: 120,        // Wait max 120ms after box appears
+    reactionMin: 40,         // Wait 40ms after box appears (fast but human-like)
+    reactionMax: 80,         // Wait max 80ms after box appears
     jitterPx: 0.5,           // Minimal pointer jitter
     distMin: 0.36,
     distMax: 0.46,
-    evGapMin: 3,             // 3 ms between pointer events (human-like)
-    evGapMax: 6,             // Small random delay for human-like
-    boxGoneMs: 80,           // Box gone detection
-    postSwipeGraceMs: 250,   // 250 ms after pointerup before accepting next box (ONE-BY-ONE)
-    angleConfidenceMin: 0.999,// EXTREME confidence required
-    minAngleSamples: 10,     // Minimum consistent samples required (increased to 10)
-    maxAngleVariance: 0.04,  // Max radians variance allowed between samples (very tight)
-    consecutiveRequired: 10, // Consecutive same-direction readings required (increased to 10)
-    boxStableWaitMs: 150,    // Wait 150ms after box appears before swiping (one-by-one)
-    maxReadingsBuffer: 20,   // Maximum readings to keep in buffer
-    minBoxVisibleMs: 180,    // Box must be visible for at least 180ms before swipe
-    maxAngleChangePerFrame: 0.25, // Max angle change per frame (radians)
-    directionLockFrames: 12  // Frames with same direction before locking
+    evGapMin: 2,             // 2 ms between pointer events (fast)
+    evGapMax: 4,             // Small random delay
+    boxGoneMs: 60,           // Box gone detection
+    postSwipeGraceMs: 150,   // 150 ms after pointerup before accepting next box
+    angleConfidenceMin: 0.95, // High confidence (balanced)
+    minAngleSamples: 5,      // Minimum 5 consistent samples (fast)
+    maxAngleVariance: 0.15,  // Max radians variance (reasonable tolerance)
+    consecutiveRequired: 5,  // 5 consecutive same-direction readings
+    boxStableWaitMs: 60,     // Wait 60ms after box appears (fast)
+    maxReadingsBuffer: 12,   // Buffer size
+    minBoxVisibleMs: 80,     // Box must be visible for 80ms (fast)
+    maxAngleChangePerFrame: 0.5, // Max angle change per frame (relaxed)
+    directionLockFrames: 5   // 5 frames with same direction (fast)
   };
 
   /* ============================================================
@@ -288,22 +288,14 @@
   }
 
   /* ------------------------------------------------------------------
-     MULTI-METHOD ANGLE DETECTION - ULTRA RELIABLE (7-Method Validation)
-     Collects multiple angle readings and validates consistency before
-     committing to a swipe direction. Returns null if confidence is low.
-     Uses 7-method validation for 0% wrong swipe:
-     1. Direction consistency check (all samples must agree)
-     2. Angle variance check (angles must be within tight tolerance)
-     3. Sample count check (minimum 10 consistent samples required)
-     4. Consecutive reading check (must have N consecutive same-direction)
-     5. Box stability check (box must be visible for minimum time)
-     6. Angle change rate check (angle must not change too fast per frame)
-     7. Direction lock check (direction must be locked for N frames)
+     FAST ANGLE DETECTION - Quick validation for rapid boxes
+     Collects angle readings and validates consistency quickly.
+     Optimized for speed while maintaining accuracy.
      ------------------------------------------------------------------ */
   function addAngleReading(angle, timestamp){
     const dir = angleToDir(angle);
     
-    // Check angle change rate (method 6)
+    // Check angle change rate (relaxed for speed)
     let angleChangeValid = true;
     if(S.angleReadings.length > 0){
       const lastReading = S.angleReadings[S.angleReadings.length - 1];
@@ -317,7 +309,7 @@
     
     S.angleReadings.push({ angle, dir, t: timestamp, valid: angleChangeValid });
     
-    // Keep only last N readings for averaging (increased buffer)
+    // Keep only last N readings for averaging
     if(S.angleReadings.length > CFG.maxReadingsBuffer) S.angleReadings.shift();
     
     // Check if ALL recent readings agree on direction
@@ -347,7 +339,7 @@
       S.consecutiveSameDir = 0;
     }
     
-    // Direction lock counter (method 7)
+    // Direction lock counter (fast)
     if(allSame && hasLowVariance && hasEnoughSamples){
       S.directionLockCount++;
       if(S.directionLockCount >= CFG.directionLockFrames && !S.lockedDirection){
@@ -363,22 +355,21 @@
     // Calculate average angle from consistent readings
     const avgAngle = recent.reduce((sum, r) => sum + r.angle, 0) / recent.length;
     
-    // Confidence scoring: must pass ALL 7 checks for 1.0
+    // Confidence scoring: balanced for speed
     let confidence = 0.0;
     const passesAllChecks = hasEnoughSamples && hasLowVariance && isDirectionConsistent && 
-                           hasConsecutiveReadings && hasAngleChangeValid && 
                            S.directionLockCount >= CFG.directionLockFrames;
     
     if(passesAllChecks){
-      confidence = 1.0;  // Perfect confidence - all 7 checks passed
-    } else if(hasEnoughSamples && hasLowVariance && isDirectionConsistent && hasConsecutiveReadings && hasAngleChangeValid){
-      confidence = 0.98; // Very high confidence - 6 checks passed
-    } else if(hasEnoughSamples && hasLowVariance && isDirectionConsistent && hasConsecutiveReadings){
-      confidence = 0.90; // High confidence - 5 checks passed
-    } else if(S.angleReadings.length >= 8 && allSame && hasLowVariance){
-      confidence = 0.7;  // Medium confidence - at least 8 consistent readings
+      confidence = 1.0;  // Perfect confidence
+    } else if(hasEnoughSamples && hasLowVariance && isDirectionConsistent){
+      confidence = 0.95; // High confidence
+    } else if(S.angleReadings.length >= 5 && allSame && hasLowVariance){
+      confidence = 0.85; // Medium-high confidence
+    } else if(S.angleReadings.length >= 3 && allSame){
+      confidence = 0.7;  // Medium confidence
     } else {
-      confidence = 0.3;  // Low confidence - not enough data
+      confidence = 0.3;  // Low confidence
     }
     
     return {
@@ -571,19 +562,14 @@
     if((now - S.box.first) > 1500){ requestAnimationFrame(tick); return; }
 
     /* ================================================================
-       ULTRA-RELIABLE 7-METHOD DIRECTION VALIDATION - 0% WRONG SWIPE
-       ONLY swipe if ALL 7 validation checks pass with extreme confidence.
-       NO fallback to raw angle - WAIT for validated readings.
-       ONE-BY-ONE: Wait for box to fully appear and stabilize before swiping
+       FAST + ACCURATE DIRECTION VALIDATION - Quick response for rapid boxes
+       Balanced validation that's fast enough for quick box sequences.
        
-       Validation Methods:
-       1. Direction consistency (all samples agree)
-       2. Angle variance (within tight tolerance)
-       3. Sample count (minimum 10 consistent samples)
-       4. Consecutive readings (10 consecutive same-direction)
-       5. Box stability (box visible for 150ms+)
-       6. Angle change rate (not too fast per frame)
-       7. Direction lock (locked for 12 frames)
+       Validation Methods (simplified for speed):
+       1. Direction consistency (samples agree)
+       2. Angle variance (within tolerance)
+       3. Sample count (minimum 5 samples)
+       4. Box visible time (80ms minimum)
        ================================================================ */
     let arrowDir, angleUsed, confidence = 0, validated = null;
     
@@ -591,36 +577,31 @@
     validated = addAngleReading(S.lastAngle.angle, now);
     confidence = validated.confidence;
     
-    // CRITICAL: Only use direction if it passes ALL 7 validation checks
-    // NO FALLBACK to raw angle - this prevents wrong swipes
-    // Also ensure box has been visible long enough (one-by-one)
-    const boxVisibleLongEnough = (now - S.box.first) >= CFG.minBoxVisibleMs; // Wait 180ms after box appears
-    const boxStableWaitPassed = (now - S.box.first) >= CFG.boxStableWaitMs; // Wait 150ms
+    // Check if box has been visible long enough
+    const boxVisibleLongEnough = (now - S.box.first) >= CFG.minBoxVisibleMs;
+    const boxStableWaitPassed = (now - S.box.first) >= CFG.boxStableWaitMs;
     const hasLockedDirection = validated.lockedDir !== null;
     
-    // EXTREME VALIDATION: Must pass ALL checks
+    // BALANCED VALIDATION: Must pass key checks but faster
     const allChecksPass = 
-      validated.passesAllChecks &&                    // 7-method validation passed
-      confidence >= CFG.angleConfidenceMin &&         // Confidence >= 99.9%
-      boxVisibleLongEnough &&                         // Box visible for 180ms+
-      boxStableWaitPassed &&                          // Box stable wait passed
+      validated.passesAllChecks &&                    // validation passed
+      confidence >= CFG.angleConfidenceMin &&         // Confidence threshold
+      boxVisibleLongEnough &&                         // Box visible time
       hasLockedDirection;                             // Direction is locked
     
     if(allChecksPass){
       // Use locked direction if available, otherwise use validated direction
       arrowDir = validated.lockedDir || validated.dir;
       angleUsed = validated.avgAngle;
-      L(`✓ VALIDATED [${arrowDir.toUpperCase()}] conf=${confidence.toFixed(3)}, samples=${validated.readingCount}, var=${validated.variance.toFixed(4)}, lock=${validated.directionLockCount}/${CFG.directionLockFrames}`, '#22c55e');
+      L(`✓ VALIDATED [${arrowDir.toUpperCase()}] conf=${confidence.toFixed(3)}, samples=${validated.readingCount}`, '#22c55e');
     } else {
       // DO NOT SWIPE - wait for more readings or box to stabilize
-      // This is the key fix: never fall back to unvalidated angle
       const reasons = [];
       if(!validated.passesAllChecks) reasons.push('!checks');
       if(confidence < CFG.angleConfidenceMin) reasons.push('!conf');
       if(!boxVisibleLongEnough) reasons.push('!visible');
-      if(!boxStableWaitPassed) reasons.push('!stable');
       if(!hasLockedDirection) reasons.push('!locked');
-      L(`⏳ WAITING: ${reasons.join(', ')} | conf=${confidence.toFixed(3)}, samples=${validated.readingCount}, var=${validated.variance.toFixed(4)}, lock=${validated.directionLockCount}/${CFG.directionLockFrames}`, '#f59e0b');
+      L(`⏳ WAITING: ${reasons.join(', ')} | conf=${confidence.toFixed(3)}, samples=${validated.readingCount}`, '#f59e0b');
       requestAnimationFrame(tick);
       return;
     }
@@ -698,8 +679,15 @@
       L(`rule ${kind} → ${mode.toUpperCase()}`);
     },
     setCfg(k,v){ if(k in CFG){ CFG[k]=v; L('cfg.'+k+' = '+v); } },
-    fast(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=120; CFG.angleConfidenceMin=0.99; CFG.minAngleSamples=6; CFG.maxAngleVariance=0.08; CFG.consecutiveRequired=6; CFG.boxStableWaitMs=80; L('FAST mode (1 ms floor)'); },
-    safe(){ CFG.reactionMin=1; CFG.reactionMax=5; CFG.evGapMin=1; CFG.evGapMax=3; CFG.boxGoneMs=80; CFG.postSwipeGraceMs=150; CFG.angleConfidenceMin=0.99; CFG.minAngleSamples=7; CFG.maxAngleVariance=0.06; CFG.consecutiveRequired=7; CFG.boxStableWaitMs=100; L('SAFE mode'); },
+    fast(){ 
+      CFG.reactionMin=40; CFG.reactionMax=80; CFG.evGapMin=2; CFG.evGapMax=4; 
+      CFG.boxGoneMs=60; CFG.postSwipeGraceMs=150; 
+      CFG.angleConfidenceMin=0.95; CFG.minAngleSamples=5; CFG.maxAngleVariance=0.15; 
+      CFG.consecutiveRequired=5; CFG.boxStableWaitMs=60; 
+      CFG.maxReadingsBuffer=12; CFG.minBoxVisibleMs=80; 
+      CFG.maxAngleChangePerFrame=0.5; CFG.directionLockFrames=5;
+      L('FAST mode - Quick response for rapid boxes') 
+    },
     ultra(){ 
       CFG.reactionMin=80; CFG.reactionMax=120; CFG.evGapMin=3; CFG.evGapMax=6; 
       CFG.boxGoneMs=80; CFG.postSwipeGraceMs=250; 
@@ -707,7 +695,7 @@
       CFG.consecutiveRequired=10; CFG.boxStableWaitMs=150; 
       CFG.maxReadingsBuffer=20; CFG.minBoxVisibleMs=180; 
       CFG.maxAngleChangePerFrame=0.25; CFG.directionLockFrames=12;
-      L('ULTRA RELIABLE mode - 0%% WRONG SWIPE: 7-method validation, one-by-one swipe, HUMAN-LIKE timing') 
+      L('ULTRA RELIABLE mode - Maximum accuracy') 
     },
     human(){ 
       CFG.reactionMin=100; CFG.reactionMax=150; CFG.evGapMin=4; CFG.evGapMax=8; 
@@ -716,8 +704,8 @@
       CFG.consecutiveRequired=12; CFG.boxStableWaitMs=180; 
       CFG.maxReadingsBuffer=25; CFG.minBoxVisibleMs=200; 
       CFG.maxAngleChangePerFrame=0.2; CFG.directionLockFrames=15;
-      L('HUMAN MODE - MAXIMUM safety: 7-method validation, very slow human-like timing') 
+      L('HUMAN MODE - Slow human-like timing') 
     }
   };
-  L('PLAY7 ULTRA RELIABLE ready - 0%% WRONG SWIPE: 7-method validation (direction+variance+samples+consecutive+box-stability+angle-change+direction-lock), one-by-one swipe, NO FALLBACK. Thunder/Gully/Firefox/Heart=SAME dir, Trap=OPPOSITE. Use PLAY7.human() for maximum safety.','#22c55e');
+  L('PLAY7 FAST ready - Optimized for rapid boxes with accurate swipes. Thunder/Gully/Firefox/Heart=SAME dir, Trap=OPPOSITE. Use PLAY7.fast() for speed or PLAY7.ultra() for maximum accuracy.','#22c55e');
 })();
