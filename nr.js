@@ -1,31 +1,36 @@
-/* PLAY6 — Strict Sequential v4 (locked snapshot, 10–30ms) */
+/* PLAY6 — Strict Game Rules v5 (Zero Error, Auto-Speed, Sequential) */
 (function(){
   if(window.PLAY6 && window.PLAY6.__live){
     try{ PLAY6.stop(); }catch(_){}
   }
-
+  
   const CFG = {
-    reactionMin: 10,
-    reactionMax: 30,
-    evGapMin: 4,
-    evGapMax: 8,
-    postSwipeMs: 15,
-    gapThresholdMs: 90,
-    sameBoxCooldown: 250,
-    minFrameWaitMs: 16,
-    flickerWindowMs: 45,
-    jitterPx: 5,
-    distMin: 0.34,
-    distMax: 0.44
+    baseReactionMin: 8,
+    baseReactionMax: 20,
+    evGapMin: 3,
+    evGapMax: 7,
+    postSwipeMs: 12,
+    gapThresholdMs: 80,
+    sameBoxCooldown: 200,
+    minFrameWaitMs: 12,
+    flickerWindowMs: 40,
+    jitterPx: 4,
+    distMin: 0.32,
+    distMax: 0.42,
+    // Auto-speed detection
+    speedMultiplier: 1.0,
+    lastBoxTime: 0,
+    boxIntervals: [],
+    avgInterval: 0
   };
-
+  
   function rnd(a,b){ return a + Math.random()*(b-a); }
   function rndi(a,b){ return Math.floor(rnd(a,b+1)); }
-
+  
   const S = {
     __live: true,
     running: true,
-    state: 'idle',          // idle | ready | swiping
+    state: 'idle',
     activeBox: null,
     lastDrawnName: null,
     lastDrawnAt: 0,
@@ -38,14 +43,44 @@
     stats: {up:0, down:0, left:0, right:0},
     log: []
   };
-
+  
   const P='%c[P6]%c ', S1='background:#8b5cf6;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold';
   const L=(m,c)=>console.log(P,S1,'color:'+(c||'#c4b5fd'),m);
-
+  
   const frame=()=>[...document.querySelectorAll('iframe')].find(f=>(f.getAttribute('src')||'').includes('/game'));
   const win=()=>{try{return frame()?.contentWindow||null}catch(_){return null}};
   const cv =()=>{try{return frame()?.contentDocument?.querySelector('canvas')||null}catch(_){return null}};
 
+  /* ========== GAME RULES ENGINE ========== */
+  const BOX_RULES = {
+    'thunder': { type: 'collect', points: 15, swipe: 'arrow' },
+    'gully':   { type: 'collect', points: 50, swipe: 'arrow' },
+    'firefox': { type: 'collect', points: 50, swipe: 'arrow' },
+    'heart':   { type: 'life',    points: 0,  swipe: 'arrow' },
+    'trap':    { type: 'avoid',   points: 0,  swipe: 'opposite' }
+  };
+
+  function getBoxType(name){
+    const n = name.toLowerCase();
+    if(n.includes('thunder')) return 'thunder';
+    if(n.includes('gully'))   return 'gully';
+    if(n.includes('firefox')) return 'firefox';
+    if(n.includes('heart'))   return 'heart';
+    if(n.includes('trap'))    return 'trap';
+    return null;
+  }
+
+  function oppositeDir(d){
+    return d==='up'?'down':d==='down'?'up':d==='left'?'right':'left';
+  }
+
+  function getCorrectSwipe(boxType, arrowDir){
+    const rule = BOX_RULES[boxType];
+    if(!rule) return arrowDir;
+    return rule.swipe === 'opposite' ? oppositeDir(arrowDir) : arrowDir;
+  }
+  /* ======================================= */
+  
   function angleToDir(a){
     const t = Math.PI*2;
     a = a - t*Math.floor((a+Math.PI)/t);
@@ -55,26 +90,54 @@
     if(d>=135 || d<-135) return 'left';
     return 'up';
   }
-  const opp = d => d==='up'?'down':d==='down'?'up':d==='left'?'right':'left';
 
   const BOX_RE = /box-(thunder|gully|firefox|heart|trap)/i;
 
+  /* ---------- AUTO SPEED DETECTION ---------- */
+  function updateSpeed(now){
+    if(CFG.lastBoxTime > 0){
+      const interval = now - CFG.lastBoxTime;
+      CFG.boxIntervals.push(interval);
+      if(CFG.boxIntervals.length > 20) CFG.boxIntervals.shift();
+      
+      const sum = CFG.boxIntervals.reduce((a,b)=>a+b, 0);
+      CFG.avgInterval = sum / CFG.boxIntervals.length;
+      
+      // Calculate speed multiplier based on average interval
+      // Slower intervals = lower multiplier, faster = higher
+      const refInterval = 500; // reference: boxes every 500ms = normal speed
+      CFG.speedMultiplier = Math.max(0.3, Math.min(3.0, refInterval / (CFG.avgInterval || refInterval)));
+    }
+    CFG.lastBoxTime = now;
+  }
+
+  function getAdaptiveReaction(){
+    // Adjust reaction time based on game speed
+    const base = rnd(CFG.baseReactionMin, CFG.baseReactionMax);
+    return Math.max(3, base / CFG.speedMultiplier);
+  }
+  /* ------------------------------------------ */
+
   /* ---------- box build ---------- */
   function buildActiveBox(nm, now){
-    const reaction = rnd(CFG.reactionMin, CFG.reactionMax);
+    const reaction = getAdaptiveReaction();
     S.activeBox = {
       name: nm,
       firstSeen: now,
       lastSeen: now,
       readyAt: now + reaction,
       trap: /trap/i.test(nm),
-      _fired: false                // ONE-SHOT GUARD
+      boxType: getBoxType(nm),
+      _fired: false
     };
     S.state = 'ready';
-    L(`◆ box ${nm} ${S.activeBox.trap?'[TRAP]':'[ARROW]'} reaction=${Math.round(reaction)}ms`, '#a78bfa');
+    L(`◆ box ${nm} [${S.activeBox.boxType}] ${S.activeBox.trap?'[TRAP]':'[ARROW]'} reaction=${Math.round(reaction)}ms speed=${CFG.speedMultiplier.toFixed(2)}`, '#a78bfa');
   }
 
   function onBoxDraw(nm, now){
+    // Track speed for auto-adjustment
+    updateSpeed(now);
+    
     const prevName = S.lastDrawnName;
     const prevAt   = S.lastDrawnAt;
     S.lastDrawnName = nm;
@@ -82,13 +145,11 @@
 
     if (S.state === 'swiping') return;
 
-    // same as active → refresh only
     if (S.state === 'ready' && S.activeBox && S.activeBox.name === nm){
       S.activeBox.lastSeen = now;
       return;
     }
 
-    // recently swiped sprite still animating out → ignore
     if (S.swipedName === nm && (now - S.swipedAt) < CFG.sameBoxCooldown){
       return;
     }
@@ -99,20 +160,18 @@
     else if ((now - prevAt) > CFG.gapThresholdMs)  isNew = true;
     if (!isNew) return;
 
-    // different box while ready → flicker or miss?
     if (S.state === 'ready' && S.activeBox && S.activeBox.name !== nm){
       const age = now - S.activeBox.firstSeen;
       const fired = S.activeBox._fired;
 
-      // FLICKER: rapid sprite swap (same logical box) → just rename
       if (age < CFG.flickerWindowMs && !fired){
         S.activeBox.name = nm;
         S.activeBox.trap = /trap/i.test(nm);
+        S.activeBox.boxType = getBoxType(nm);
         S.activeBox.lastSeen = now;
         return;
       }
 
-      // don't count as miss if we already fired on it (it was consumed)
       if (!fired){
         S.misses++;
         L(`⚠ MISS ${S.activeBox.name} → replaced by ${nm}`, '#ef4444');
@@ -207,43 +266,43 @@
     }, g1);
   }
 
-  /* ---------- driver ---------- */
+  /* ---------- driver (SEQUENTIAL ONE-BY-ONE) ---------- */
   function trySwipe(){
     if (S.state !== 'ready') return;
     if (!S.activeBox)        return;
-    if (S.activeBox._fired)  return;         // ONE-SHOT
+    if (S.activeBox._fired)  return;
 
-    const box = S.activeBox;                  // ← LOCK reference
+    const box = S.activeBox;
     const now = performance.now();
 
     if (now < box.readyAt) return;
     if (now - box.firstSeen < CFG.minFrameWaitMs) return;
 
-    // STRICT angle freshness: must be captured AFTER this box appeared
     if (!S.lastAngle) return;
     if (S.lastAngle.t < box.firstSeen) return;
 
-    // SNAPSHOT — lock everything now
     const snap = {
       name: box.name,
       trap: box.trap,
+      boxType: box.boxType,
       firstSeen: box.firstSeen,
       age: now - box.firstSeen
     };
 
     const rawDir   = angleToDir(S.lastAngle.angle);
-    const swipeDir = snap.trap ? opp(rawDir) : rawDir;
+    // Apply GAME RULES: get correct swipe direction based on box type
+    const swipeDir = getCorrectSwipe(snap.boxType, rawDir);
 
-    // mark consumed BEFORE any async
+    // Mark consumed BEFORE any async - ensures ONE BY ONE processing
     box._fired = true;
     S.state = 'swiping';
     S.count++;
     S.stats[swipeDir]++;
 
     if (S.log.length > 120) S.log.shift();
-    S.log.push({ n:S.count, box:snap.name, trap:snap.trap, raw:rawDir, swipe:swipeDir, delay:snap.age });
+    S.log.push({ n:S.count, box:snap.name, type:snap.boxType, trap:snap.trap, raw:rawDir, swipe:swipeDir, delay:snap.age });
 
-    L(`→ #${S.count} ${swipeDir.toUpperCase()} ${snap.trap?'[TRAP]':'[ARROW]'} ${snap.name} raw=${rawDir} delay=${snap.age}ms`,
+    L(`→ #${S.count} ${swipeDir.toUpperCase()} [${snap.boxType}] ${snap.trap?'[TRAP INVERTED]':'[ARROW]'} raw=${rawDir} delay=${snap.age.toFixed(1)}ms`,
       snap.trap ? '#f59e0b' : '#22d3ee');
 
     performSwipe(swipeDir, () => {
@@ -252,7 +311,7 @@
       S.activeBox  = null;
       S.state      = 'idle';
 
-      // Catch any box drawn during our swipe window
+      // Check for next box waiting - process ONE BY ONE
       const recentDraw = S.lastDrawnAt;
       const drawnName  = S.lastDrawnName;
       if (drawnName && (performance.now() - recentDraw) < 100){
@@ -280,7 +339,7 @@
     const c = cv();
     if (c){
       clearInterval(boot);
-      L(`✓ canvas ${c.width}x${c.height} — sequential v4 started (10–30ms, locked)`, '#22c55e');
+      L(`✓ canvas ${c.width}x${c.height} — Game Rules v5 started (auto-speed, sequential)`, '#22c55e');
       requestAnimationFrame(tick);
     } else if (++tries > 100){
       clearInterval(boot);
@@ -304,5 +363,5 @@
     }
   };
 
-  L('PLAY6 v4 — strict sequential, 10–30ms, snapshot-locked', '#22c55e');
+  L('PLAY6 v5 — Game Rules Engine, Auto-Speed, Zero Error', '#22c55e');
 })();
