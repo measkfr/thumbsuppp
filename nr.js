@@ -21,7 +21,14 @@
     speedMultiplier: 1.0,
     lastBoxTime: 0,
     boxIntervals: [],
-    avgInterval: 0
+    avgInterval: 0,
+    // NOOB MODE - Human-like behavior
+    noobMode: true,
+    minProgressToSwipe: 30,  // Minimum 30% fill before considering swipe
+    maxProgressToSwipe: 95,  // Maximum 95% fill (sometimes miss intentionally)
+    randomDelayMin: 80,      // Random delay after ready (ms)
+    randomDelayMax: 250,     // Random delay after ready (ms)
+    missChance: 0.15         // 15% chance to miss/slow react like human
   };
   
   function rnd(a,b){ return a + Math.random()*(b-a); }
@@ -112,6 +119,16 @@
   }
 
   function getAdaptiveReaction(){
+    // NOOB MODE: Human-like random delays
+    if (CFG.noobMode) {
+      // Random delay to simulate human reaction variability
+      const randomDelay = rnd(CFG.randomDelayMin, CFG.randomDelayMax);
+      // Sometimes intentionally slower (like a noob)
+      if (Math.random() < CFG.missChance) {
+        return randomDelay + rnd(150, 400);
+      }
+      return randomDelay;
+    }
     // Adjust reaction time based on game speed
     const base = rnd(CFG.baseReactionMin, CFG.baseReactionMax);
     return Math.max(3, base / CFG.speedMultiplier);
@@ -281,6 +298,32 @@
     if (!S.lastAngle) return;
     if (S.lastAngle.t < box.firstSeen) return;
 
+    // NOOB MODE: Check fill progress before swiping (30% to 95% random)
+    if (CFG.noobMode && S.lastAngle) {
+      // Calculate approximate fill percentage based on angle rotation
+      // Assuming full circle (2*PI) = 100% fill
+      const currentAngle = Math.abs(S.lastAngle.angle % (Math.PI * 2));
+      const fillPercent = (currentAngle / (Math.PI * 2)) * 100;
+      
+      // Random threshold between min and max progress
+      const randomThreshold = rnd(CFG.minProgressToSwipe, CFG.maxProgressToSwipe);
+      
+      // Don't swipe if fill is below random threshold (act like noob waiting)
+      if (fillPercent < randomThreshold) {
+        return;
+      }
+      
+      // Sometimes intentionally miss when fill is too high (>90%)
+      if (fillPercent > 90 && Math.random() < 0.2) {
+        L(`⚠ NOOB: missed at ${fillPercent.toFixed(1)}% (intentional)`, '#fbbf24');
+        box._fired = true; // Mark as fired to skip
+        S.misses++;
+        S.state = 'idle';
+        S.activeBox = null;
+        return;
+      }
+    }
+
     const snap = {
       name: box.name,
       trap: box.trap,
@@ -360,8 +403,12 @@
       S.state='idle'; S.activeBox=null; S.lastAngle=null;
       S.swipedName=null; S.swipedAt=0; S.count=0; S.misses=0;
       L('reset');
-    }
+    },
+    // NOOB MODE controls
+    enableNoobMode(){ CFG.noobMode = true; L('✓ NOOB MODE enabled - acting like human player', '#22c55e'); },
+    disableNoobMode(){ CFG.noobMode = false; L('✗ NOOB MODE disabled - pro mode active', '#ef4444'); },
+    toggleNoobMode(){ CFG.noobMode = !CFG.noobMode; L(CFG.noobMode ? '✓ NOOB MODE ON' : '✗ NOOB MODE OFF', CFG.noobMode ? '#22c55e' : '#ef4444'); }
   };
 
-  L('PLAY6 v5 — Game Rules Engine, Auto-Speed, Zero Error', '#22c55e');
+  L('PLAY6 v5 — NOOB MODE Active (30%-95% random swipe) 🎮 Human-like behavior', '#22c55e');
 })();
