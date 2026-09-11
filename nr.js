@@ -228,7 +228,13 @@
     minSwipeWindowMs: 70,    // MINIMUM time before swipe can execute (prevents ultra-fast miss)
     lastBoxSize: null,       // Track last box size for detection
     sizeChangeThreshold: 1.3,// Box size increased by 30% = high score mode
-    highScoreMode: false     // Auto-detect high score based on box size
+    highScoreMode: false,    // Auto-detect high score based on box size
+    highScoreSpeedCap: true, // CRITICAL FIX: Cap speed when box size increases (1500+ score)
+    minReactionAtHighScore: 120, // MINIMUM reaction time at high scores (prevent instant speed)
+    boxQueueLimit: 10,       // Handle up to 10 boxes in queue (line-wise boxes fix)
+    boxProcessingDelay: 40,  // Delay between processing multiple boxes
+    consecutiveBoxesDetected: 0, // Track consecutive rapid boxes
+    maxConsecutiveBoxes: 5   // Max boxes before enforcing slower timing
   };
 
   /* ============================================================
@@ -468,9 +474,35 @@
           CFG.highScoreMode = true;
           isHighScoreBox = true;
           console.log('%c[P7]%c HIGH SCORE DETECTED! Box size: '+currentBoxSize.toFixed(0)+' (was '+CFG.lastBoxSize.toFixed(0)+')', 'background:#f59e0b;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold', 'color:#fcd34d');
+          
+          // CRITICAL FIX: When box size increases, enforce minimum reaction time
+          // This prevents the game from becoming too fast to react
+          if(CFG.highScoreSpeedCap){
+            CFG.reactionMin = Math.max(CFG.reactionMin, CFG.minReactionAtHighScore);
+            CFG.reactionMax = Math.max(CFG.reactionMax, CFG.minReactionAtHighScore + 40);
+            CFG.boxStableWaitMs = Math.max(CFG.boxStableWaitMs, 100);
+            CFG.minBoxVisibleMs = Math.max(CFG.minBoxVisibleMs, 120);
+            console.log('%c[P7]%c SPEED CAPPED: Minimum reaction time enforced for high score mode', 'background:#dc2626;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold', 'color:#fca5a5');
+          }
         } else if(CFG.lastBoxSize !== null && currentBoxSize < CFG.lastBoxSize * 0.7){
           // Box size decreased, reset high score mode
           CFG.highScoreMode = false;
+        }
+        
+        // Track consecutive boxes (for line-wise 10 boxes fix)
+        if(sameName && stillAlive){
+          // Same box still visible, reset counter
+          CFG.consecutiveBoxesDetected = 0;
+        } else {
+          // New box detected, increment counter
+          CFG.consecutiveBoxesDetected++;
+          
+          // If too many consecutive boxes (line-wise pattern), slow down processing
+          if(CFG.consecutiveBoxesDetected > CFG.maxConsecutiveBoxes){
+            CFG.boxProcessingDelay = Math.min(CFG.boxProcessingDelay + 10, 80);
+            CFG.reactionMin = Math.max(CFG.reactionMin, 60);
+            console.log('%c[P7]%c LINE-WISE BOXES DETECTED! Slowing down processing...', 'background:#f59e0b;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold', 'color:#fcd34d');
+          }
         }
         
         // Update last box size
@@ -751,6 +783,7 @@
     },
     highscore(){
       // Special mode for 1500+ scores with large boxes and ultra-fast speed
+      // FIX: Now includes speed cap to prevent impossible reaction times
       CFG.reactionMin=30; CFG.reactionMax=60; CFG.evGapMin=1; CFG.evGapMax=3;
       CFG.boxGoneMs=50; CFG.postSwipeGraceMs=100;
       CFG.angleConfidenceMin=0.97; CFG.minAngleSamples=7; CFG.maxAngleVariance=0.12;
@@ -759,8 +792,31 @@
       CFG.maxAngleChangePerFrame=0.6; CFG.directionLockFrames=6;
       CFG.minSwipeWindowMs=80; CFG.sizeChangeThreshold=1.25;
       CFG.highScoreMode = true;
-      L('HIGH SCORE MODE - Optimized for 1500+ scores with large fast boxes','#f59e0b');
+      CFG.highScoreSpeedCap = true;  // Enable speed cap when box size increases
+      CFG.minReactionAtHighScore = 120;  // Minimum reaction time at high scores
+      CFG.boxQueueLimit = 10;  // Handle line-wise 10 boxes
+      CFG.maxConsecutiveBoxes = 5;  // Slow down after 5 consecutive boxes
+      L('HIGH SCORE MODE - Optimized for 1500+ scores with SPEED CAP fix','#f59e0b');
+    },
+    reset(){
+      // Reset all config to defaults and clear tracking
+      CFG.reactionMin=40; CFG.reactionMax=80; CFG.evGapMin=2; CFG.evGapMax=4;
+      CFG.boxGoneMs=60; CFG.postSwipeGraceMs=150;
+      CFG.angleConfidenceMin=0.95; CFG.minAngleSamples=5; CFG.maxAngleVariance=0.15;
+      CFG.consecutiveRequired=5; CFG.boxStableWaitMs=60;
+      CFG.maxReadingsBuffer=12; CFG.minBoxVisibleMs=80;
+      CFG.maxAngleChangePerFrame=0.5; CFG.directionLockFrames=5;
+      CFG.minSwipeWindowMs=70; CFG.sizeChangeThreshold=1.3;
+      CFG.highScoreMode = false;
+      CFG.highScoreSpeedCap = true;
+      CFG.minReactionAtHighScore = 120;
+      CFG.boxQueueLimit = 10;
+      CFG.boxProcessingDelay = 40;
+      CFG.consecutiveBoxesDetected = 0;
+      CFG.maxConsecutiveBoxes = 5;
+      CFG.lastBoxSize = null;
+      L('RESET - All config and tracking cleared','#22c55e');
     }
   };
-  L('PLAY7 FAST ready - Optimized for rapid boxes with accurate swipes. Thunder/Gully/Firefox/Heart=SAME dir, Trap=OPPOSITE. Use PLAY7.fast() for speed, PLAY7.ultra() for accuracy, or PLAY7.highscore() for 1500+ scores.','#22c55e');
+  L('PLAY7 FAST ready - FIXED: 1500+ score speed cap + line-wise 10 boxes handling. Thunder/Gully/Firefox/Heart=SAME dir, Trap=OPPOSITE. Use PLAY7.fast() for speed, PLAY7.ultra() for accuracy, or PLAY7.highscore() for 1500+ scores.','#22c55e');
 })();
