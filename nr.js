@@ -228,7 +228,8 @@
     minSwipeWindowMs: 70,    // MINIMUM time before swipe can execute (prevents ultra-fast miss)
     lastBoxSize: null,       // Track last box size for detection
     sizeChangeThreshold: 1.3,// Box size increased by 30% = high score mode
-    highScoreMode: false     // Auto-detect high score based on box size
+    highScoreMode: false,    // Auto-detect high score based on box size
+    zeptosecondMode: false   // ZEPTOSECOND MODE: Instant validation for 1500+ scores with multiple boxes
   };
 
   /* ============================================================
@@ -588,6 +589,55 @@
     if(S.lastAngle.t < S.box.first){ requestAnimationFrame(tick); return; }
     if((now - S.box.first) > 1500){ requestAnimationFrame(tick); return; }
     
+    // ZEPTOSECOND MODE: Instant validation for 1500+ scores with multiple boxes appearing at once
+    // Skip all delays and validations when zeptosecond mode is active
+    const isZeptosecondActive = CFG.zeptosecondMode || (CFG.highScoreMode && S.box.isHighScore);
+    
+    if(isZeptosecondActive){
+      // ZEPTOSECOND MODE: Minimal validation, instant swipe for rapid box sequences
+      const arrowDir = angleToDir(S.lastAngle.angle);
+      const { dir: swipeDir, rule } = applyRule(S.box.kind, arrowDir);
+      
+      S.swiped = true;
+      S.swipeInProgress = true;
+      S.lastSwipedBoxId = S.box.id;
+      S.count++;
+      S.stats[swipeDir]++;
+      S.stats[S.box.kind]++;
+
+      if(S.log.length>80) S.log.shift();
+      S.log.push({
+        id: S.box.id,
+        name: S.box.name,
+        kind: S.box.kind,
+        angle: (S.lastAngle.angle*180/Math.PI).toFixed(0),
+        arrow: arrowDir,
+        rule,
+        swipe: swipeDir,
+        delay: Math.round(now - S.box.first),
+        confidence: 1.0,
+        variance: 0,
+        samples: 1,
+        zeptosecond: true
+      });
+
+      const tag = S.box.kind === 'trap' ? '[TRAP→OPP]'
+                : S.box.kind === 'life' ? '[LIFE]'
+                : '[ARROW]';
+      const col = S.box.kind === 'trap' ? '#f59e0b'
+                : S.box.kind === 'life' ? '#ef4444'
+                : '#22d3ee';
+
+      L(`⚡ ZEPTO [${swipeDir.toUpperCase()}] #${S.count} ${tag} rule=${rule} arrow=${arrowDir} sprite=${S.box.name} delay=${Math.round(now-S.box.first)}ms`, col);
+
+      swipe(swipeDir);
+      S.swipeAt = performance.now();
+      S.lastBoxName = S.box.name;
+      clearAngleReadings();
+      requestAnimationFrame(tick);
+      return;
+    }
+    
     // HIGH SCORE MODE: Enforce minimum swipe window to prevent missing boxes
     // that appear for extremely short time at high scores (1500+)
     if(S.box.isHighScore && (now - S.box.first) < CFG.minSwipeWindowMs){
@@ -760,7 +810,21 @@
       CFG.minSwipeWindowMs=80; CFG.sizeChangeThreshold=1.25;
       CFG.highScoreMode = true;
       L('HIGH SCORE MODE - Optimized for 1500+ scores with large fast boxes','#f59e0b');
+    },
+    zepto(){
+      // ZEPTOSECOND MODE: Instant validation for 1500+ scores when 15 boxes appear at once
+      // This mode bypasses all delays and validations to swipe ALL answers at once
+      CFG.reactionMin=0; CFG.reactionMax=10; CFG.evGapMin=0; CFG.evGapMax=1;
+      CFG.boxGoneMs=30; CFG.postSwipeGraceMs=50;
+      CFG.angleConfidenceMin=0.5; CFG.minAngleSamples=1; CFG.maxAngleVariance=1.0;
+      CFG.consecutiveRequired=1; CFG.boxStableWaitMs=0;
+      CFG.maxReadingsBuffer=3; CFG.minBoxVisibleMs=0;
+      CFG.maxAngleChangePerFrame=2.0; CFG.directionLockFrames=1;
+      CFG.minSwipeWindowMs=0; CFG.sizeChangeThreshold=1.1;
+      CFG.highScoreMode = true;
+      CFG.zeptosecondMode = true;
+      L('⚡ ZEPTOSECOND MODE - Instant swipes for 1500+ scores with multiple boxes at once!','#dc2626');
     }
   };
-  L('PLAY7 FAST ready - Optimized for rapid boxes with accurate swipes. Thunder/Gully/Firefox/Heart=SAME dir, Trap=OPPOSITE. Use PLAY7.fast() for speed, PLAY7.ultra() for accuracy, or PLAY7.highscore() for 1500+ scores.','#22c55e');
+  L('PLAY7 FAST ready - Optimized for rapid boxes with accurate swipes. Thunder/Gully/Firefox/Heart=SAME dir, Trap=OPPOSITE. Use PLAY7.fast() for speed, PLAY7.ultra() for accuracy, PLAY7.highscore() for 1500+ scores, or PLAY7.zepto() for instant multi-box validation.','#22c55e');
 })();
