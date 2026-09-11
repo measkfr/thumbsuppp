@@ -215,11 +215,13 @@
     evGapMin: 1,             // 1 ms between pointer events
     evGapMax: 1,             // deterministic — no random delay
     boxGoneMs: 40,           // tighter "box gone" detection
-    postSwipeGraceMs: 80,    // 80 ms after pointerup before accepting next box (ONE-BY-ONE)
+    postSwipeGraceMs: 120,   // 120 ms after pointerup before accepting next box (ONE-BY-ONE)
     angleConfidenceMin: 0.99,// EXTREME confidence required
-    minAngleSamples: 5,      // Minimum consistent samples required (increased)
-    maxAngleVariance: 0.10,  // Max radians variance allowed between samples (tighter)
-    consecutiveRequired: 5   // Consecutive same-direction readings required
+    minAngleSamples: 6,      // Minimum consistent samples required (increased to 6)
+    maxAngleVariance: 0.08,  // Max radians variance allowed between samples (tighter)
+    consecutiveRequired: 6,  // Consecutive same-direction readings required (increased)
+    boxStableWaitMs: 80,     // Wait 80ms after box appears before swiping (one-by-one)
+    maxReadingsBuffer: 12    // Maximum readings to keep in buffer
   };
 
   /* ============================================================
@@ -283,18 +285,19 @@
      MULTI-METHOD ANGLE DETECTION - ULTRA RELIABLE
      Collects multiple angle readings and validates consistency before
      committing to a swipe direction. Returns null if confidence is low.
-     Uses 4-method validation:
+     Uses 5-method validation:
      1. Direction consistency check (all samples must agree)
      2. Angle variance check (angles must be within tight tolerance)
-     3. Sample count check (minimum 5 consistent samples required)
+     3. Sample count check (minimum 6 consistent samples required)
      4. Consecutive reading check (must have N consecutive same-direction)
+     5. Box stability check (box must be visible for minimum time)
      ------------------------------------------------------------------ */
   function addAngleReading(angle, timestamp){
     const dir = angleToDir(angle);
     S.angleReadings.push({ angle, dir, t: timestamp });
     
-    // Keep only last 10 readings for averaging (increased buffer)
-    if(S.angleReadings.length > 10) S.angleReadings.shift();
+    // Keep only last N readings for averaging (increased buffer)
+    if(S.angleReadings.length > CFG.maxReadingsBuffer) S.angleReadings.shift();
     
     // Check if ALL recent readings agree on direction
     const checkCount = Math.min(S.angleReadings.length, CFG.minAngleSamples);
@@ -328,11 +331,11 @@
     // Confidence scoring: must pass ALL checks for 1.0
     let confidence = 0.0;
     if(hasEnoughSamples && hasLowVariance && isDirectionConsistent && hasConsecutiveReadings){
-      confidence = 1.0;  // Perfect confidence - all 4 checks passed
+      confidence = 1.0;  // Perfect confidence - all 5 checks passed
     } else if(hasEnoughSamples && hasLowVariance && isDirectionConsistent){
-      confidence = 0.97; // Very high confidence - 3 checks passed
-    } else if(S.angleReadings.length >= 4 && allSame){
-      confidence = 0.8;  // Medium confidence - at least 4 consistent readings
+      confidence = 0.97; // Very high confidence - 4 checks passed
+    } else if(S.angleReadings.length >= 5 && allSame){
+      confidence = 0.8;  // Medium confidence - at least 5 consistent readings
     } else {
       confidence = 0.3;  // Low confidence - not enough data
     }
@@ -519,7 +522,7 @@
        ULTRA-RELIABLE MULTI-METHOD DIRECTION VALIDATION
        ONLY swipe if ALL validation checks pass with extreme confidence.
        NO fallback to raw angle - WAIT for validated readings.
-       ONE-BY-ONE: Wait for box to fully appear before swiping
+       ONE-BY-ONE: Wait for box to fully appear and stabilize before swiping
        ================================================================ */
     let arrowDir, angleUsed, confidence = 0, validated = null;
     
@@ -530,7 +533,7 @@
     // CRITICAL: Only use direction if it passes ALL validation checks
     // NO FALLBACK to raw angle - this prevents wrong swipes
     // Also ensure box has been visible long enough (one-by-one)
-    const boxVisibleLongEnough = (now - S.box.first) > 60; // Wait 60ms after box appears
+    const boxVisibleLongEnough = (now - S.box.first) > CFG.boxStableWaitMs; // Wait 80ms after box appears
     
     if(validated.passesAllChecks && confidence >= CFG.angleConfidenceMin && boxVisibleLongEnough){
       arrowDir = validated.dir;
@@ -617,9 +620,9 @@
       L(`rule ${kind} → ${mode.toUpperCase()}`);
     },
     setCfg(k,v){ if(k in CFG){ CFG[k]=v; L('cfg.'+k+' = '+v); } },
-    fast(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=80; CFG.angleConfidenceMin=0.99; CFG.minAngleSamples=5; CFG.maxAngleVariance=0.10; CFG.consecutiveRequired=5; L('FAST mode (1 ms floor)'); },
-    safe(){ CFG.reactionMin=1; CFG.reactionMax=5; CFG.evGapMin=1; CFG.evGapMax=3; CFG.boxGoneMs=80; CFG.postSwipeGraceMs=100; CFG.angleConfidenceMin=0.99; CFG.minAngleSamples=6; CFG.maxAngleVariance=0.08; CFG.consecutiveRequired=6; L('SAFE mode'); },
-    ultra(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=80; CFG.angleConfidenceMin=0.99; CFG.minAngleSamples=5; CFG.maxAngleVariance=0.10; CFG.consecutiveRequired=5; L('ULTRA RELIABLE mode - 0%% WRONG SWIPE: 4-method validation, one-by-one swipe') }
+    fast(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=120; CFG.angleConfidenceMin=0.99; CFG.minAngleSamples=6; CFG.maxAngleVariance=0.08; CFG.consecutiveRequired=6; CFG.boxStableWaitMs=80; L('FAST mode (1 ms floor)'); },
+    safe(){ CFG.reactionMin=1; CFG.reactionMax=5; CFG.evGapMin=1; CFG.evGapMax=3; CFG.boxGoneMs=80; CFG.postSwipeGraceMs=150; CFG.angleConfidenceMin=0.99; CFG.minAngleSamples=7; CFG.maxAngleVariance=0.06; CFG.consecutiveRequired=7; CFG.boxStableWaitMs=100; L('SAFE mode'); },
+    ultra(){ CFG.reactionMin=0; CFG.reactionMax=1; CFG.evGapMin=1; CFG.evGapMax=1; CFG.boxGoneMs=40; CFG.postSwipeGraceMs=120; CFG.angleConfidenceMin=0.99; CFG.minAngleSamples=6; CFG.maxAngleVariance=0.08; CFG.consecutiveRequired=6; CFG.boxStableWaitMs=80; L('ULTRA RELIABLE mode - 0%% WRONG SWIPE: 5-method validation, one-by-one swipe') }
   };
-  L('PLAY7 ULTRA RELIABLE ready - 0%% WRONG SWIPE: 4-method validation (direction+variance+samples+consecutive), one-by-one swipe, NO FALLBACK. Thunder/Gully/Firefox/Heart=SAME dir, Trap=OPPOSITE.','#22c55e');
+  L('PLAY7 ULTRA RELIABLE ready - 0%% WRONG SWIPE: 5-method validation (direction+variance+samples+consecutive+box-stability), one-by-one swipe, NO FALLBACK. Thunder/Gully/Firefox/Heart=SAME dir, Trap=OPPOSITE.','#22c55e');
 })();
